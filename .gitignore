@@ -11,7 +11,7 @@ yarn-error.log
 .yarn/*
 !.yarn/releases
 !.yarn/plugins
-.pnp.*
+.pnp*
 
 dist
 artifacts

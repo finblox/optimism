@@ -1,0 +1,206 @@
+version: '3.4'
+
+services:
+  optimism:
+    build:
+      context: ..
+      dockerfile: l3-local-testnet/Optimism.Dockerfile
+    image: optimism_build_base
+    volumes:
+      - "../:/optimism/"
+      - ".envrc:/optimism/.envrc"
+    working_dir: /optimism
+    env_file:
+      - .envrc
+    stdin_open: true
+    tty: true
+    command:
+      - -c
+      - |-
+        direnv allow \
+        && git config --global --add safe.directory /optimism \
+        && source $$HOME/.bashrc \
+        && ./packages/contracts-bedrock/scripts/getting-started/versions.sh \
+        && pnpm install \
+        && pnpm install \
+        && npx nx reset \
+        && pnpm install \
+        && exec bash
+
+  da:
+    build:
+      context: .
+      dockerfile: Celestia.Dockerfile
+    image: celestia_da_node
+    command:
+      - "light"
+      - "start"
+      - "--core.ip https://base-sepolia.g.alchemy.com/v2/Xm3H7BirppZC1UY7SOoji744ZTCXJf9_"
+      - "--gateway"
+      - "--gateway.addr da"
+      - "--gateway.port 26659"
+      - "--p2p.network blockspacerace"
+    environment:
+      - NODE_TYPE=light
+      - P2P_NETWORK=blockspacerace
+    volumes:
+      - ./celestia/:/home/celestia
+
+  op-node:
+    image: docker-proxy.nexus.finblox.co/golang:1.21-alpine3.19
+    volumes:
+      - "../op-node:/app/op-node"
+      - "./jwt.txt:/app/op-node/jwt.txt"
+    working_dir: /app/op-node
+    env_file:
+      - .envrc
+    command:
+      - bash
+      - -c
+      - |-
+        apk add git jq \
+        && curl -sfL https://direnv.net/install.sh | bash \
+        && direnv allow \
+        && openssl rand -hex 32 > ./jwt.txt
+        && go run ./cmd \
+          --l2=http://op-geth:8551 \
+          --l2.jwt-secret=./jwt.txt \
+          --sequencer.enabled \
+          --sequencer.l1-confs=5 \
+          --verifier.l1-confs=4 \
+          --rollup.config=./rollup.json \
+          --rpc.addr=0.0.0.0 \
+          --rpc.port=8547 \
+          --p2p.disable \
+          --rpc.enable-admin \
+          --p2p.sequencer.key=$$GS_SEQUENCER_PRIVATE_KEY \
+          --l1=$$L1_RPC_URL \
+          --l1.rpckind=$$L1_RPC_KIND
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          "(echo > /dev/tcp/localhost/8547) || exit 1"
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 600
+
+  op-batcher:
+    image: docker-proxy.nexus.finblox.co/golang:1.21-alpine3.19
+    volumes:
+      - "../op-batcher:/app/op-batcher"
+      - "./jwt.txt:/app/op-batcher/jwt.txt"
+    working_dir: /app/op-batcher
+    env_file:
+      - .envrc
+    command:
+      - bash
+      - -c
+      - |-
+        apk add git jq \
+        && curl -sfL https://direnv.net/install.sh | bash \
+        && direnv allow \
+        && go run ./cmd \
+          --l2-eth-rpc=http://op-geth:8551 \
+          --rollup-rpc=http://op-node:8547 \
+          --poll-interval=1s \
+          --sub-safety-margin=6 \
+          --num-confirmations=1 \
+          --safe-abort-nonce-too-low-count=3 \
+          --resubmission-timeout=30s \
+          --rpc.addr=0.0.0.0 \
+          --rpc.port=8548 \
+          --rpc.enable-admin \
+          --max-channel-duration=1 \
+          --l1-eth-rpc=$$L1_RPC_URL \
+          --private-key=$$GS_BATCHER_PRIVATE_KEY
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          "(echo > /dev/tcp/localhost/8548) || exit 1"
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 600
+
+  op-proposer:
+    image: docker-proxy.nexus.finblox.co/golang:1.21-alpine3.19
+    volumes:
+      - "../op-proposer:/app/op-proposer"
+      - "./jwt.txt:/app/op-proposer/jwt.txt"
+      - "../packages/contracts-bedrock/deployments/getting-started/L2OutputOracleProxy.json:/app/op-proposer/L2OutputOracleProxy.json"
+    working_dir: /app/op-proposer
+    env_file:
+      - .envrc
+    command:
+      - bash
+      - -c
+      - |-
+        apk add git jq \
+        && curl -sfL https://direnv.net/install.sh | bash \
+        && direnv allow \
+        && go run ./cmd \
+          --poll-interval=12s \
+          --rpc.port=8560 \
+          --rollup-rpc=http://op-node:8547 \
+          --l2oo-address=$$(cat ./L2OutputOracleProxy.json | jq -r .address) \
+          --private-key=$$GS_PROPOSER_PRIVATE_KEY \
+          --l1-eth-rpc=$$L1_RPC_URL
+  op-geth:
+    image: docker-proxy.nexus.finblox.co/golang:1.21-alpine3.19
+    volumes:
+      - "../op-geth:/app/op-geth"
+      - "./jwt.txt:/app/op-geth/jwt.txt"
+      - "./genesis.json:/app/op-geth/genesis.json"
+      - "./datadir:app/op-geth/datadir"
+    working_dir: /app/op-geth
+    env_file:
+      - .envrc
+    command:
+      - bash
+      - -c
+      - |-
+        apk add git jq \
+        && curl -sfL https://direnv.net/install.sh | bash \
+        && direnv allow \
+        && go run ./cmd/geth \
+          init --datadir=datadir ./genesis.json \
+        && go run ./cmd/geth \
+          --datadir ./datadir \
+          --http \
+          --http.corsdomain="*" \
+          --http.vhosts="*" \
+          --http.addr=0.0.0.0 \
+          --http.api=web3,debug,eth,txpool,net,engine \
+          --ws \
+          --ws.addr=0.0.0.0 \
+          --ws.port=8546 \
+          --ws.origins="*" \
+          --ws.api=debug,eth,txpool,net,engine \
+          --syncmode=full \
+          --gcmode=archive \
+          --nodiscover \
+          --maxpeers=0 \
+          --networkid=42069 \
+          --authrpc.vhosts="*" \
+          --authrpc.addr=0.0.0.0 \
+          --authrpc.port=8551 \
+          --authrpc.jwtsecret=./jwt.txt \
+          --rollup.disabletxpoolgossip=true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          "(echo > /dev/tcp/localhost/8546) || exit 1"
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 600
